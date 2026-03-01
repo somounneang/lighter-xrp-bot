@@ -1,12 +1,11 @@
 """
 market/orderbook.py
 -------------------
-Fetches and parses the XRP orderbook from Lighter.
-
-Confirmed from live API:
-  lighter.OrderApi(client).order_book_orders(market_id=7)
-  Response: raw.order_book_orders[0].ask_book / .bid_book
-  Each level: .price (float), .amount (float) — no scaling needed
+Confirmed real API response structure:
+  raw = await order_api.order_book_orders(market_id=7, limit=N)
+  raw.bids  → list of SimpleOrder  (highest price first)
+  raw.asks  → list of SimpleOrder  (lowest price first)
+  Each SimpleOrder: .price (str), .remaining_base_amount (str)
 """
 from __future__ import annotations
 
@@ -20,33 +19,25 @@ log = get_logger(__name__)
 
 
 async def fetch_orderbook(depth: int = 20) -> dict:
-    """
-    Returns:
-        {
-          "bids": [{"price": float, "size": float}, ...],  # highest first
-          "asks": [{"price": float, "size": float}, ...],  # lowest first
-          "mid":  float,
-          "spread": float,
-        }
-    """
     try:
         client = get_api_client()
         order_api = lighter.OrderApi(client)
-        raw = await order_api.order_book_orders(market_id=settings.XRP_MARKET_INDEX)
-
-        if hasattr(raw, "order_book_orders") and raw.order_book_orders:
-            ob_data = raw.order_book_orders[0]
-        else:
-            ob_data = raw
+        raw = await order_api.order_book_orders(
+            market_id=settings.XRP_MARKET_INDEX,
+            limit=depth,
+        )
 
         def _parse(levels):
             return [
-                {"price": float(lvl.price), "size": float(lvl.amount)}
-                for lvl in (levels or [])[:depth]
+                {
+                    "price": float(lvl.price),
+                    "size":  float(lvl.remaining_base_amount),
+                }
+                for lvl in (levels or [])
             ]
 
-        asks = _parse(getattr(ob_data, "ask_book", []))
-        bids = _parse(getattr(ob_data, "bid_book", []))
+        bids = _parse(getattr(raw, "bids", []))
+        asks = _parse(getattr(raw, "asks", []))
 
         if not bids or not asks:
             raise MarketDataError("Orderbook returned empty bids or asks")
@@ -54,6 +45,7 @@ async def fetch_orderbook(depth: int = 20) -> dict:
         mid    = (bids[0]["price"] + asks[0]["price"]) / 2
         spread = asks[0]["price"] - bids[0]["price"]
 
+        log.debug(f"OB | best_bid={bids[0]['price']} best_ask={asks[0]['price']} mid={mid:.6f}")
         return {"bids": bids, "asks": asks, "mid": mid, "spread": spread}
 
     except MarketDataError:
@@ -63,5 +55,4 @@ async def fetch_orderbook(depth: int = 20) -> dict:
 
 
 async def get_mid_price() -> float:
-    ob = await fetch_orderbook(depth=1)
-    return ob["mid"]
+    return (await fetch_orderbook(depth=5))["mid"]
