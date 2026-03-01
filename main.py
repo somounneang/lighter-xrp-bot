@@ -31,6 +31,7 @@ from core.client import get_signer, get_api_client, close_clients, get_market_me
 from core.exceptions import KillSwitchError, OrderError, RiskLimitError
 from market.orderbook import fetch_orderbook
 from market.candles import get_candle_buffer
+from market.history import preload_candles
 from market.account import get_account_state
 from strategy.base import Direction, Signal
 from strategy.trend_following import TrendFollowingStrategy
@@ -165,6 +166,7 @@ async def run_independent(dry_run: bool = False) -> None:
 
     multi = IndependentMultiStrategy()
     candles = get_candle_buffer(interval_seconds=settings.CANDLE_INTERVAL_SECONDS)
+    await preload_candles(candles, count=220)  # instant warm-up
     warmup_done = False
 
     log.info(
@@ -260,6 +262,7 @@ async def run_single(strategy, dry_run: bool = False) -> None:
     global _shutdown
 
     candles     = get_candle_buffer(interval_seconds=settings.CANDLE_INTERVAL_SECONDS)
+    await preload_candles(candles, count=220)  # instant warm-up
     warmup_done = False
 
     log.info(
