@@ -1,0 +1,7 @@
+lighter-sdk
+python-dotenv
+pandas
+numpy
+aiohttp
+asyncio
+loguru
