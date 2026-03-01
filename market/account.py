@@ -1,10 +1,9 @@
 """
 market/account.py
 -----------------
-Fetches live account state: collateral balance, open XRP position,
-and unrealised P&L.
+Fetches live account state: collateral, XRP position, P&L.
 
-Correct SDK: lighter.AccountApi(client).account(by="index", value=str(account_index))
+Confirmed SDK method: lighter.AccountApi(client).account(by="index", value="N")
 """
 from __future__ import annotations
 
@@ -20,8 +19,8 @@ async def get_account_state() -> dict:
     """
     Returns:
         {
-          "collateral":       float,   # USDC free collateral
-          "position":         float,   # signed XRP position (+long, -short)
+          "collateral":       float,
+          "position":         float,  # signed (+long, -short)
           "avg_entry_price":  float,
           "unrealized_pnl":   float,
           "realized_pnl":     float,
@@ -29,18 +28,15 @@ async def get_account_state() -> dict:
     """
     client = get_api_client()
     api = lighter.AccountApi(client)
-    # Correct method: account(by="index", value="123")
     acct = await api.account(by="index", value=str(settings.ACCOUNT_INDEX))
 
     collateral = float(getattr(acct, "collateral", 0) or 0)
+    position   = 0.0
+    avg_entry  = 0.0
+    unrealized = 0.0
+    realized   = 0.0
 
-    position    = 0.0
-    avg_entry   = 0.0
-    unrealized  = 0.0
-    realized    = 0.0
-
-    positions = getattr(acct, "positions", None) or []
-    for pos in positions:
+    for pos in (getattr(acct, "positions", None) or []):
         if int(getattr(pos, "market_id", -1)) == settings.XRP_MARKET_INDEX:
             sign       = int(getattr(pos, "sign", 1))
             position   = float(getattr(pos, "position", 0)) * sign

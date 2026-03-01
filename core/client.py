@@ -14,13 +14,10 @@ log = get_logger(__name__)
 
 _signer: lighter.SignerClient | None = None
 _api_client: lighter.ApiClient | None = None
-
-# Market metadata cached after first fetch
 _market_meta: dict | None = None
 
 
 def get_signer() -> lighter.SignerClient:
-    """Return (or lazily initialise) the SignerClient."""
     global _signer
     if _signer is None:
         log.info(f"Initialising SignerClient → {settings.BASE_URL}")
@@ -34,7 +31,6 @@ def get_signer() -> lighter.SignerClient:
 
 
 def get_api_client() -> lighter.ApiClient:
-    """Return (or lazily initialise) the read-only ApiClient."""
     global _api_client
     if _api_client is None:
         config = lighter.Configuration(host=settings.BASE_URL)
@@ -44,7 +40,6 @@ def get_api_client() -> lighter.ApiClient:
 
 
 async def close_clients() -> None:
-    """Gracefully close both clients on shutdown."""
     global _api_client
     if _api_client:
         await _api_client.close()
@@ -53,26 +48,38 @@ async def close_clients() -> None:
 
 async def get_market_meta(market_index: int | None = None) -> dict:
     """
-    Fetch and cache market metadata (base_size, base_price tick units).
-    Returns metadata for XRP_MARKET_INDEX by default.
+    Fetch and cache market metadata for the XRP market.
 
-    Uses lighter.OrderApi.order_book_details() — the correct SDK method.
+    Confirmed real response shape from live API:
+        details.order_book_details[0]  →  PerpsOrderBookDetail
+            .symbol              e.g. "XRP"
+            .market_id           int (7 for XRP)
+            .size_decimals       e.g. 1
+            .price_decimals      e.g. 5
+            .min_base_amount     e.g. "5.0"
+            .last_trade_price    float
     """
     global _market_meta
     if _market_meta is None:
         idx = market_index if market_index is not None else settings.XRP_MARKET_INDEX
         client = get_api_client()
         order_api = lighter.OrderApi(client)
-        # order_book_details accepts by="index" and value=str(market_index)
-        details = await order_api.order_book_details(by="index", value=str(idx))
+        details = await order_api.order_book_details(market_id=idx)
 
-        # The response object contains a list of order_books; grab index 0
-        ob = details.order_books[0] if hasattr(details, "order_books") else details
+        ob = details.order_book_details[0]
+
+        size_dec  = int(ob.size_decimals)
+        price_dec = int(ob.price_decimals)
 
         _market_meta = {
-            "base_size":  int(ob.base_size),    # lot size multiplier
-            "base_price": int(ob.quote_size),   # tick size multiplier (quote_size = price tick)
-            "symbol":     ob.symbol,
+            "base_size":       10 ** size_dec,
+            "base_price":      10 ** price_dec,
+            "size_decimals":   size_dec,
+            "price_decimals":  price_dec,
+            "min_base_amount": float(ob.min_base_amount),
+            "symbol":          ob.symbol,
+            "market_id":       int(ob.market_id),
+            "last_price":      float(ob.last_trade_price),
         }
-        log.info(f"Market meta fetched: {_market_meta}")
+        log.info(f"Market meta: {_market_meta}")
     return _market_meta

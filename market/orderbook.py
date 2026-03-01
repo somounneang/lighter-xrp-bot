@@ -1,15 +1,17 @@
 """
 market/orderbook.py
 -------------------
-Fetches and parses the XRP-USD orderbook from Lighter.
+Fetches and parses the XRP orderbook from Lighter.
 
-Correct SDK usage:
-  lighter.OrderApi(client).order_book_orders(by="index", value=str(market_index))
+Confirmed from live API:
+  lighter.OrderApi(client).order_book_orders(market_id=7)
+  Response: raw.order_book_orders[0].ask_book / .bid_book
+  Each level: .price (float), .amount (float) — no scaling needed
 """
 from __future__ import annotations
 
 import lighter
-from core.client import get_api_client, get_market_meta
+from core.client import get_api_client
 from core.exceptions import MarketDataError
 from config import settings
 from utils.logger import get_logger
@@ -19,42 +21,32 @@ log = get_logger(__name__)
 
 async def fetch_orderbook(depth: int = 20) -> dict:
     """
-    Fetch the current orderbook.
-
     Returns:
         {
-          "bids": [{"price": float, "size": float}, ...],   # best bid first
-          "asks": [{"price": float, "size": float}, ...],   # best ask first
+          "bids": [{"price": float, "size": float}, ...],  # highest first
+          "asks": [{"price": float, "size": float}, ...],  # lowest first
           "mid":  float,
           "spread": float,
         }
     """
     try:
         client = get_api_client()
-        meta = await get_market_meta()
-        bp = meta["base_price"]
-        bs = meta["base_size"]
-
         order_api = lighter.OrderApi(client)
-        raw = await order_api.order_book_orders(
-            by="index",
-            value=str(settings.XRP_MARKET_INDEX),
-        )
+        raw = await order_api.order_book_orders(market_id=settings.XRP_MARKET_INDEX)
 
-        # Response shape: raw.order_books[0].bids / .asks
-        ob_data = raw.order_books[0] if hasattr(raw, "order_books") else raw
+        if hasattr(raw, "order_book_orders") and raw.order_book_orders:
+            ob_data = raw.order_book_orders[0]
+        else:
+            ob_data = raw
 
-        def _parse_levels(levels):
-            result = []
-            for lvl in (levels or [])[:depth]:
-                result.append({
-                    "price": int(lvl.price) / bp,
-                    "size":  int(lvl.amount) / bs,
-                })
-            return result
+        def _parse(levels):
+            return [
+                {"price": float(lvl.price), "size": float(lvl.amount)}
+                for lvl in (levels or [])[:depth]
+            ]
 
-        bids = _parse_levels(getattr(ob_data, "bids", []))
-        asks = _parse_levels(getattr(ob_data, "asks", []))
+        asks = _parse(getattr(ob_data, "ask_book", []))
+        bids = _parse(getattr(ob_data, "bid_book", []))
 
         if not bids or not asks:
             raise MarketDataError("Orderbook returned empty bids or asks")

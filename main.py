@@ -3,24 +3,16 @@ main.py
 -------
 XRP Trading Bot for Lighter.xyz
 
-Strategies available (set STRATEGY in .env):
+Strategies (set STRATEGY in .env):
   trend_following   EMA crossover + RSI + ATR stops
   mean_reversion    Bollinger Band bounces + RSI filter
-  combined          Both must agree (recommended — lower signal frequency, higher quality)
+  combined          Both must agree — recommended
 
 Run:
-    python main.py                     # Start the bot
-    python main.py --list-markets      # Print all markets and their indices (find XRP)
-    python main.py --dry-run           # Simulate signals without placing real orders
-
-Usage:
-    1. Copy .env.example to .env and fill in your credentials
-    2. Run --list-markets to confirm the XRP market_index
-    3. Update XRP_MARKET_INDEX in .env
-    4. Run --dry-run for a few cycles to verify signals look sane
-    5. Remove --dry-run to go live
+    python main.py                  # Live trading
+    python main.py --list-markets   # Show all markets and their IDs
+    python main.py --dry-run        # Simulate without real orders
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +26,7 @@ import lighter
 from config import settings
 from core.client import get_signer, get_api_client, close_clients, get_market_meta
 from core.exceptions import KillSwitchError, OrderError, RiskLimitError
-from market.orderbook import fetch_orderbook, get_mid_price
+from market.orderbook import fetch_orderbook
 from market.candles import get_candle_buffer
 from market.account import get_account_state
 from strategy.base import Direction, Signal
@@ -79,58 +71,59 @@ def build_strategy():
         return CombinedStrategy()
 
 
-# ── Market listing helper ──────────────────────────────────────────────────────
+# ── Market listing ─────────────────────────────────────────────────────────────
 
 async def list_markets():
-    """Print all available markets with their indices — helps find XRP."""
+    """List all available Lighter markets. Confirmed: order_books() returns all."""
     client = get_api_client()
-    # Correct SDK class: lighter.OrderApi  (there is no lighter.MarketApi)
     order_api = lighter.OrderApi(client)
-    resp = await order_api.order_book_details(by="all", value="")
-    print("\n" + "─" * 50)
-    print(f"{'Index':<8} {'Symbol':<20} {'Base Size':<12} {'Quote Size'}")
-    print("─" * 50)
-    for ob in (resp.order_books or []):
-        idx    = getattr(ob, "market_id", getattr(ob, "index", "?"))
-        symbol = getattr(ob, "symbol", "?")
-        bsize  = getattr(ob, "base_size", "?")
-        qsize  = getattr(ob, "quote_size", "?")
-        print(f"{str(idx):<8} {symbol:<20} {str(bsize):<12} {qsize}")
-    print("─" * 50)
-    print("\nFind the XRP market and set XRP_MARKET_INDEX= in your .env\n")
+
+    # Fetch all markets using order_book_details with each market_id
+    # order_books() gives the full list
+    resp = await order_api.order_books()
+
+    print("\n" + "─" * 60)
+    print(f"{'market_id':<12} {'Symbol':<20} {'Status':<12} {'Last Price'}")
+    print("─" * 60)
+
+    books = getattr(resp, "order_books", [])
+    for ob in books:
+        mid   = getattr(ob, "market_id",       "?")
+        sym   = getattr(ob, "symbol",           "?")
+        stat  = getattr(ob, "status",           "active")
+        price = getattr(ob, "last_trade_price", "?")
+        print(f"{str(mid):<12} {sym:<20} {str(stat):<12} {price}")
+
+    print("─" * 60)
+    print(f"\n>>> XRP market_id is 7  — set XRP_MARKET_INDEX=7 in your .env\n")
     await close_clients()
 
 
 # ── Signal execution ───────────────────────────────────────────────────────────
 
 async def execute_signal(sig: Signal, account: dict, dry_run: bool = False) -> None:
-    """
-    Translate a strategy Signal into actual orders (or log them in dry-run mode).
-    """
     current_pos = account["position"]
 
     if sig.direction == Direction.FLAT and sig.size_xrp == 0:
         log.debug(f"No action | {sig.reason}")
         return
 
-    # ── Close position ────────────────────────────────────────────────────────
+    # ── Close existing position ───────────────────────────────────────────────
     if sig.direction == Direction.FLAT and abs(current_pos) > 0:
         close_dir = Direction.SHORT if current_pos > 0 else Direction.LONG
         close_size = abs(current_pos)
-
-        # Worst-price: 2% slippage tolerance
         slippage = 0.02
-        worst_px = sig.entry_price * (1 - slippage) if close_dir == Direction.SHORT else \
-                   sig.entry_price * (1 + slippage)
+        worst_px = (sig.entry_price * (1 - slippage) if close_dir == Direction.SHORT
+                    else sig.entry_price * (1 + slippage))
 
-        log.info(f"[CLOSE] {close_dir.name} {close_size:.2f} XRP @ ~{sig.entry_price:.4f} | {sig.reason}")
+        log.info(f"[CLOSE] {close_dir.name} {close_size:.1f} XRP @ ~{sig.entry_price:.5f} | {sig.reason}")
         if not dry_run:
             await place_market_order(close_dir, close_size, worst_px, reason=sig.reason)
         else:
             log.info("[DRY-RUN] Would close position")
         return
 
-    # ── Open position ─────────────────────────────────────────────────────────
+    # ── Open new position ─────────────────────────────────────────────────────
     if sig.direction in (Direction.LONG, Direction.SHORT) and current_pos == 0:
         try:
             validated = rm.validate_signal(sig, current_pos)
@@ -138,10 +131,12 @@ async def execute_signal(sig: Signal, account: dict, dry_run: bool = False) -> N
             log.warning(f"Risk rejected signal: {e}")
             return
 
-        log.info(f"[ENTRY] {sig.direction.name} {validated.size_xrp:.2f} XRP "
-                 f"@ {validated.entry_price:.4f} | SL={validated.stop_loss:.4f} "
-                 f"TP={validated.take_profit:.4f} | {validated.reason}")
-
+        log.info(
+            f"[ENTRY] {validated.direction.name} {validated.size_xrp:.1f} XRP "
+            f"@ {validated.entry_price:.5f} | "
+            f"SL={validated.stop_loss:.5f} TP={validated.take_profit:.5f} | "
+            f"{validated.reason}"
+        )
         if not dry_run:
             await place_limit_order(
                 direction=validated.direction,
@@ -155,7 +150,7 @@ async def execute_signal(sig: Signal, account: dict, dry_run: bool = False) -> N
             log.info("[DRY-RUN] Would place limit order")
 
 
-# ── Main loop ──────────────────────────────────────────────────────────────────
+# ── Main bot loop ──────────────────────────────────────────────────────────────
 
 async def run_bot(dry_run: bool = False) -> None:
     global _shutdown
@@ -163,16 +158,22 @@ async def run_bot(dry_run: bool = False) -> None:
     setup_logger(log_level=settings.LOG_LEVEL, log_file=settings.LOG_FILE)
     log.info("=" * 60)
     log.info("  XRP Trading Bot — Lighter.xyz")
-    log.info(f"  Strategy : {settings.STRATEGY}")
-    log.info(f"  Market   : XRP (index {settings.XRP_MARKET_INDEX})")
-    log.info(f"  Dry-run  : {dry_run}")
+    log.info(f"  Strategy  : {settings.STRATEGY}")
+    log.info(f"  Market ID : {settings.XRP_MARKET_INDEX} (XRP)")
+    log.info(f"  Dry-run   : {dry_run}")
     log.info("=" * 60)
 
     # Warm up clients
     _ = get_signer()
     _ = get_api_client()
     meta = await get_market_meta()
-    log.info(f"Market metadata: {meta}")
+    log.info(
+        f"Market: {meta['symbol']} | "
+        f"size_decimals={meta['size_decimals']} | "
+        f"price_decimals={meta['price_decimals']} | "
+        f"min_amount={meta['min_base_amount']} | "
+        f"last_price={meta['last_price']}"
+    )
 
     strategy    = build_strategy()
     candles     = get_candle_buffer(interval_seconds=60)
@@ -182,65 +183,63 @@ async def run_bot(dry_run: bool = False) -> None:
         loop_start = time.time()
 
         try:
-            # ── 1. Daily reset check ──────────────────────────────────────────
+            # ── Daily reset ───────────────────────────────────────────────────
             state = rm.get_state()
             if time.time() - state.daily_start_ts > 86_400:
                 rm.reset_daily_pnl()
 
-            # ── 2. Fetch market data ──────────────────────────────────────────
-            ob      = await fetch_orderbook(depth=5)
-            mid     = ob["mid"]
-            spread  = ob["spread"]
+            # ── Fetch market data ─────────────────────────────────────────────
+            ob     = await fetch_orderbook(depth=5)
+            mid    = ob["mid"]
+            spread = ob["spread"]
 
-            # Record price into candle builder
-            candle_completed = candles.record_price(mid)
-            if candle_completed:
-                log.debug(f"New candle closed | candles buffered: {len(candles)}")
+            candles.record_price(mid)
 
-            log.info(f"Tick | mid={mid:.4f} spread={spread:.5f} candles={len(candles)}")
+            log.info(
+                f"Tick | XRP={mid:.5f} | spread={spread:.5f} | "
+                f"candles={len(candles)}/{strategy.min_candles_required}"
+            )
 
-            # ── 3. Fetch account state ────────────────────────────────────────
+            # ── Fetch account state ───────────────────────────────────────────
             account = await get_account_state()
             pos     = account["position"]
             collat  = account["collateral"]
 
-            log.info(f"Account | position={pos:.2f} XRP | "
-                     f"collateral={collat:.2f} USDC | "
-                     f"uPnL={account['unrealized_pnl']:.2f}")
+            log.info(
+                f"Account | pos={pos:.1f} XRP | "
+                f"collateral={collat:.2f} USDC | "
+                f"uPnL={account['unrealized_pnl']:.2f}"
+            )
 
-            # ── 4. Check SL/TP for existing position ──────────────────────────
+            # ── SL/TP check ───────────────────────────────────────────────────
             if pos != 0:
                 sl_tp_hit = await check_sl_tp(mid, pos)
                 if sl_tp_hit and not dry_run:
-                    log.warning(f"Closing position due to {sl_tp_hit.upper()}")
+                    log.warning(f"Closing position: {sl_tp_hit.upper()} hit")
                     close_dir = Direction.SHORT if pos > 0 else Direction.LONG
-                    slippage = 0.02
-                    worst_px = mid * (1 - slippage) if close_dir == Direction.SHORT \
-                               else mid * (1 + slippage)
+                    slippage  = 0.02
+                    worst_px  = (mid * (1 - slippage) if close_dir == Direction.SHORT
+                                 else mid * (1 + slippage))
                     await place_market_order(close_dir, abs(pos), worst_px,
-                                            reason=sl_tp_hit.upper())
+                                             reason=sl_tp_hit.upper())
 
-            # ── 5. Generate strategy signal ───────────────────────────────────
-            min_c = strategy.min_candles_required
-            if not candles.enough_data(min_c):
-                remaining = min_c - len(candles)
-                log.info(f"Warming up — need {remaining} more candles "
-                         f"({len(candles)}/{min_c})")
+            # ── Strategy signal ───────────────────────────────────────────────
+            if not candles.enough_data(strategy.min_candles_required):
+                remaining = strategy.min_candles_required - len(candles)
+                log.info(f"Warming up — {remaining} more candles needed...")
             else:
                 if not warmup_done:
                     log.success("Warm-up complete — bot is now active!")
                     warmup_done = True
 
-                df = candles.to_dataframe()
+                df  = candles.to_dataframe()
                 sig = strategy.generate_signal(df, mid, pos, collat)
 
                 log.info(f"Signal | {sig.direction.name} | {sig.reason}")
-
                 await execute_signal(sig, account, dry_run=dry_run)
 
         except KillSwitchError as e:
             log.critical(f"KILL SWITCH: {e}")
-            log.critical("Cancelling all orders and stopping bot...")
             if not dry_run:
                 try:
                     await cancel_all()
@@ -249,25 +248,22 @@ async def run_bot(dry_run: bool = False) -> None:
             break
 
         except OrderError as e:
-            log.error(f"Order error (will retry next tick): {e}")
+            log.error(f"Order error (retrying next tick): {e}")
 
         except Exception as e:
             log.exception(f"Unexpected error: {e}")
 
         finally:
-            # ── 6. Sleep until next tick ──────────────────────────────────────
             elapsed = time.time() - loop_start
             sleep_t = max(0, settings.POLL_INTERVAL_SECONDS - elapsed)
             if not _shutdown:
-                log.debug(f"Sleeping {sleep_t:.1f}s until next tick...")
                 await asyncio.sleep(sleep_t)
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
-    log.warning("Bot loop exited — cleaning up...")
+    log.warning("Bot shutting down...")
     if not dry_run:
         try:
             await cancel_all()
-            log.info("All orders cancelled on shutdown")
         except Exception as e:
             log.error(f"Error cancelling orders on shutdown: {e}")
     await close_clients()
@@ -281,7 +277,7 @@ def parse_args():
     parser.add_argument("--list-markets", action="store_true",
                         help="List all Lighter markets and exit")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Run without placing real orders")
+                        help="Simulate signals without placing real orders")
     return parser.parse_args()
 
 
