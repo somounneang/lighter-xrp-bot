@@ -84,15 +84,20 @@ def build_strategy():
 async def list_markets():
     """Print all available markets with their indices — helps find XRP."""
     client = get_api_client()
-    api = lighter.MarketApi(client)
-    markets = await api.markets()
-    print("\n{'─'*50}")
-    print(f"{'Index':<8} {'Symbol':<15} {'Status'}")
-    print("─" * 40)
-    for m in markets.markets:
-        print(f"{m.market_index:<8} {m.symbol:<15} {getattr(m, 'status', 'active')}")
-    print("─" * 40)
-    print("\nSet XRP_MARKET_INDEX in your .env to the index shown above.\n")
+    # Correct SDK class: lighter.OrderApi  (there is no lighter.MarketApi)
+    order_api = lighter.OrderApi(client)
+    resp = await order_api.order_book_details(by="all", value="")
+    print("\n" + "─" * 50)
+    print(f"{'Index':<8} {'Symbol':<20} {'Base Size':<12} {'Quote Size'}")
+    print("─" * 50)
+    for ob in (resp.order_books or []):
+        idx    = getattr(ob, "market_id", getattr(ob, "index", "?"))
+        symbol = getattr(ob, "symbol", "?")
+        bsize  = getattr(ob, "base_size", "?")
+        qsize  = getattr(ob, "quote_size", "?")
+        print(f"{str(idx):<8} {symbol:<20} {str(bsize):<12} {qsize}")
+    print("─" * 50)
+    print("\nFind the XRP market and set XRP_MARKET_INDEX= in your .env\n")
     await close_clients()
 
 

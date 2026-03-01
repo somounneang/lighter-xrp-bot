@@ -2,7 +2,9 @@
 market/orderbook.py
 -------------------
 Fetches and parses the XRP-USD orderbook from Lighter.
-Returns clean Python dicts — no SDK types leak beyond this module.
+
+Correct SDK usage:
+  lighter.OrderApi(client).order_book_orders(by="index", value=str(market_index))
 """
 from __future__ import annotations
 
@@ -33,23 +35,26 @@ async def fetch_orderbook(depth: int = 20) -> dict:
         bp = meta["base_price"]
         bs = meta["base_size"]
 
-        market_api = lighter.MarketApi(client)
-        raw = await market_api.orderbook(
-            market_index=settings.XRP_MARKET_INDEX,
-            depth=depth,
+        order_api = lighter.OrderApi(client)
+        raw = await order_api.order_book_orders(
+            by="index",
+            value=str(settings.XRP_MARKET_INDEX),
         )
+
+        # Response shape: raw.order_books[0].bids / .asks
+        ob_data = raw.order_books[0] if hasattr(raw, "order_books") else raw
 
         def _parse_levels(levels):
             result = []
-            for lvl in (levels or []):
+            for lvl in (levels or [])[:depth]:
                 result.append({
                     "price": int(lvl.price) / bp,
                     "size":  int(lvl.amount) / bs,
                 })
             return result
 
-        bids = _parse_levels(raw.bids)
-        asks = _parse_levels(raw.asks)
+        bids = _parse_levels(getattr(ob_data, "bids", []))
+        asks = _parse_levels(getattr(ob_data, "asks", []))
 
         if not bids or not asks:
             raise MarketDataError("Orderbook returned empty bids or asks")

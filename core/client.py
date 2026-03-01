@@ -55,18 +55,24 @@ async def get_market_meta(market_index: int | None = None) -> dict:
     """
     Fetch and cache market metadata (base_size, base_price tick units).
     Returns metadata for XRP_MARKET_INDEX by default.
+
+    Uses lighter.OrderApi.order_book_details() — the correct SDK method.
     """
     global _market_meta
     if _market_meta is None:
+        idx = market_index if market_index is not None else settings.XRP_MARKET_INDEX
         client = get_api_client()
-        market_api = lighter.MarketApi(client)
-        details = await market_api.orderbook_details(
-            market_index=market_index or settings.XRP_MARKET_INDEX
-        )
+        order_api = lighter.OrderApi(client)
+        # order_book_details accepts by="index" and value=str(market_index)
+        details = await order_api.order_book_details(by="index", value=str(idx))
+
+        # The response object contains a list of order_books; grab index 0
+        ob = details.order_books[0] if hasattr(details, "order_books") else details
+
         _market_meta = {
-            "base_size":  int(details.base_size),   # lot size multiplier
-            "base_price": int(details.base_price),  # tick size multiplier
-            "symbol":     details.symbol,
+            "base_size":  int(ob.base_size),    # lot size multiplier
+            "base_price": int(ob.quote_size),   # tick size multiplier (quote_size = price tick)
+            "symbol":     ob.symbol,
         }
         log.info(f"Market meta fetched: {_market_meta}")
     return _market_meta
